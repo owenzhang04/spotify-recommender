@@ -309,6 +309,7 @@ def pick_track_for_artist(artist: Artist, p: TasteProfile,
         tracks = []
     else:
         tracks = []
+        sp = None
         try:
             _spotify_call()
             sp = _spotify()
@@ -332,6 +333,8 @@ def pick_track_for_artist(artist: Artist, p: TasteProfile,
         if not tracks and not _live_calls_paused():
             try:
                 _spotify_call()
+                if sp is None:
+                    sp = _spotify()
                 r = sp.search(q=artist.name, type="track", limit=5)
                 for t in r["tracks"]["items"][:3]:
                     tracks.append(Track(
@@ -469,12 +472,20 @@ def _playlist_artist_ids(pl, p: TasteProfile) -> list[str]:
     return out
 
 
+# Full playlist cliques are O(n²); cap keeps normal playlists intact.
+_MAX_CLIQUE_ARTISTS = 50
+
+# Treat PageRank mass below this as "no graph signal" (float noise / isolates).
+_GRAPH_PR_EPS = 1e-12
+
+
 def build_artist_cooccurrence_graph(p: TasteProfile) -> nx.Graph:
     """Nodes = artists. Edges = co-appear in the same playlist / liked set."""
     g = nx.Graph()
 
     def add_clique(artist_ids: list[str], weight: float) -> None:
-        aids = list(dict.fromkeys(artist_ids))  # stable unique
+        # Cap dense sets so huge playlists don't explode edge count.
+        aids = list(dict.fromkeys(artist_ids))[:_MAX_CLIQUE_ARTISTS]
         for i, a in enumerate(aids):
             g.add_node(a, kind="artist")
             for b in aids[i + 1:]:
@@ -602,16 +613,21 @@ def recommend_by_genre(p: TasteProfile, fp: TasteFingerprint,
                        candidates: list[Artist] | None = None,
                        n: int = 8,
                        exclude: set[str] | None = None,
-                       hybrid: dict[str, float] | None = None) -> list[RecommendedTrack]:
+                       hybrid: dict[str, float] | None = None,
+                       raw_scores: dict[str, float] | None = None,
+                       include: set[str] | None = None,
+                       ) -> list[RecommendedTrack]:
     """Pick artists whose genre tags overlap your top genres."""
     candidates = candidates if candidates is not None else get_candidate_pool(p, fp)
     top_genres = {g for g, _ in fp.top_genres[:8]}
     known_artists = {aid for aid, _ in fp.top_artists}
     exclude = exclude or set()
 
-    raw = _genre_raw_scores(fp, candidates)
+    raw = raw_scores if raw_scores is not None else _genre_raw_scores(fp, candidates)
+    pool = include if include is not None else set(raw)
     ranked_ids = sorted(
-        (aid for aid in raw if aid not in exclude and aid not in known_artists),
+        (aid for aid in pool
+         if aid not in exclude and aid not in known_artists),
         key=lambda aid: -(hybrid or raw).get(aid, raw.get(aid, 0.0)),
     )
     by_id = {a.id: a for a in candidates}
@@ -651,22 +667,73 @@ def recommend_by_genre(p: TasteProfile, fp: TasteFingerprint,
 build_cooccurrence_graph = build_artist_cooccurrence_graph
 
 
+def _has_graph_mass(
+    aid: str,
+    graph_raw: dict[str, float],
+    related_raw: dict[str, float],
+) -> bool:
+    return (
+        graph_raw.get(aid, 0.0) > _GRAPH_PR_EPS
+        or related_raw.get(aid, 0.0) > 0.0
+    )
+
+
+def _graph_reason(
+    aid: str,
+    graph_raw: dict[str, float],
+    related_raw: dict[str, float],
+) -> str:
+    if graph_raw.get(aid, 0.0) > _GRAPH_PR_EPS:
+        return "shares listeners with artists you love"
+    if related_raw.get(aid, 0.0) > 0.0:
+        return "related to artists you love"
+    return "related to artists you love"
+
+
 def recommend_by_graph(p: TasteProfile, fp: TasteFingerprint,
                        candidates: list[Artist] | None = None,
                        n: int = 8,
                        exclude: set[str] | None = None,
-                       hybrid: dict[str, float] | None = None) -> list[RecommendedTrack]:
+                       hybrid: dict[str, float] | None = None,
+                       raw_scores: dict[str, float] | None = None,
+                       related_scores: dict[str, float] | None = None,
+                       include: set[str] | None = None,
+                       ) -> list[RecommendedTrack]:
     """Personalized PageRank over an artist co-occurrence graph."""
     candidates = candidates if candidates is not None else get_candidate_pool(p, fp)
-    edges = get_related_edges(p)
     known_artists = {aid for aid, _ in fp.top_artists}
     exclude = exclude or set()
 
-    raw = _graph_raw_scores(p, fp, candidates, edges)
-    ranked_ids = sorted(
-        (aid for aid in raw if aid not in exclude and aid not in known_artists),
-        key=lambda aid: -(hybrid or raw).get(aid, raw.get(aid, 0.0)),
-    )
+    if raw_scores is None or related_scores is None:
+        edges = get_related_edges(p)
+        if related_scores is None:
+            related_scores = _relatedness_scores(candidates, edges)
+        if raw_scores is None:
+            raw_scores = _graph_raw_scores(p, fp, candidates, edges)
+    raw = raw_scores
+    related = related_scores
+
+    def _ok(aid: str) -> bool:
+        return (
+            aid not in exclude
+            and aid not in known_artists
+            and (include is None or aid in include)
+        )
+
+    score_of = hybrid or raw
+    pool = include if include is not None else set(raw)
+    with_mass = [aid for aid in pool if _ok(aid) and _has_graph_mass(aid, raw, related)]
+    ranked_ids = sorted(with_mass, key=lambda aid: -score_of.get(aid, 0.0))
+    # Only surface zero-mass graph candidates once real graph/related pool is exhausted.
+    if len(ranked_ids) < n:
+        zeros = [
+            aid for aid in pool
+            if _ok(aid) and not _has_graph_mass(aid, raw, related)
+        ]
+        ranked_ids.extend(
+            sorted(zeros, key=lambda aid: -score_of.get(aid, 0.0))
+        )
+
     by_id = {a.id: a for a in candidates}
     out: list[RecommendedTrack] = []
     for aid in ranked_ids:
@@ -681,7 +748,7 @@ def recommend_by_graph(p: TasteProfile, fp: TasteFingerprint,
             artist_name=a.name,
             artist_id=a.id,
             uri=track.uri,
-            reason="shares listeners with artists you love",
+            reason=_graph_reason(aid, raw, related),
             source="graph",
         ))
     return out
@@ -733,34 +800,133 @@ def _hybrid_maps(
     return genre_hybrid, graph_hybrid
 
 
+def _assign_cross_list(
+    candidate_ids: list[str],
+    genre_hybrid: dict[str, float],
+    graph_hybrid: dict[str, float],
+    genre_raw: dict[str, float],
+    graph_raw: dict[str, float],
+    related_raw: dict[str, float],
+    n_each: int,
+) -> tuple[set[str], set[str]]:
+    """Assign each artist to at most one list by hybrid advantage.
+
+    Prefer the list where genre_hybrid - graph_hybrid is more favorable for
+    that list, while keeping the graph column honest (real PR/related mass
+    first). Top up short lists from leftovers so neither side goes empty
+    when the pool allows.
+    """
+    ranked = sorted(
+        candidate_ids,
+        key=lambda aid: -max(
+            genre_hybrid.get(aid, 0.0), graph_hybrid.get(aid, 0.0)
+        ),
+    )
+    genre_ids: list[str] = []
+    graph_ids: list[str] = []
+    deferred: list[str] = []
+
+    for aid in ranked:
+        gh = genre_hybrid.get(aid, 0.0)
+        ph = graph_hybrid.get(aid, 0.0)
+        has_genre = genre_raw.get(aid, 0.0) > 0.0
+        has_graph = _has_graph_mass(aid, graph_raw, related_raw)
+        prefer_genre = (gh - ph) > 0.0
+
+        if prefer_genre:
+            if len(genre_ids) < n_each:
+                genre_ids.append(aid)
+            elif has_graph and len(graph_ids) < n_each:
+                graph_ids.append(aid)
+            else:
+                deferred.append(aid)
+        elif has_graph:
+            if len(graph_ids) < n_each:
+                graph_ids.append(aid)
+            elif has_genre and len(genre_ids) < n_each:
+                genre_ids.append(aid)
+            else:
+                deferred.append(aid)
+        elif has_genre and len(genre_ids) < n_each:
+            # Graph-preferring but no graph mass — keep genre list honest.
+            genre_ids.append(aid)
+        else:
+            deferred.append(aid)
+
+    for aid in deferred:
+        if len(genre_ids) >= n_each and len(graph_ids) >= n_each:
+            break
+        gh = genre_hybrid.get(aid, 0.0)
+        ph = graph_hybrid.get(aid, 0.0)
+        has_genre = genre_raw.get(aid, 0.0) > 0.0
+        has_graph = _has_graph_mass(aid, graph_raw, related_raw)
+        need_genre = n_each - len(genre_ids)
+        need_graph = n_each - len(graph_ids)
+
+        if need_genre > 0 and need_graph > 0:
+            if has_graph and (ph > gh or not has_genre):
+                graph_ids.append(aid)
+            elif has_genre:
+                genre_ids.append(aid)
+            elif has_graph:
+                graph_ids.append(aid)
+            elif gh >= ph:
+                genre_ids.append(aid)
+            else:
+                graph_ids.append(aid)
+        elif need_graph > 0:
+            graph_ids.append(aid)
+        elif need_genre > 0:
+            genre_ids.append(aid)
+
+    return set(genre_ids), set(graph_ids)
+
+
 def recommend(p: TasteProfile, n_each: int = 8) -> Recommendations:
     fp = analyze_taste(p)
     candidates = get_candidate_pool(p, fp)
     edges = get_related_edges(p)
 
+    # Score once per recommend() — list builders reuse these dicts.
     genre_raw = _genre_raw_scores(fp, candidates)
     related_raw = _relatedness_scores(candidates, edges)
     graph_raw = _graph_raw_scores(p, fp, candidates, edges)
+    known_artists = {aid for aid, _ in fp.top_artists}
     cand_ids = {a.id for a in candidates}
     genre_hybrid, graph_hybrid = _hybrid_maps(
         genre_raw, related_raw, graph_raw, cand_ids
     )
 
-    # Genre list first (primary signal), then graph list excluding those artists.
+    assignable = [aid for aid in cand_ids if aid not in known_artists]
+    genre_set, graph_set = _assign_cross_list(
+        assignable, genre_hybrid, graph_hybrid,
+        genre_raw, graph_raw, related_raw, n_each,
+    )
+
     genre_recs = _dedupe(recommend_by_genre(
-        p, fp, candidates, n=n_each, hybrid=genre_hybrid,
+        p, fp, candidates, n=n_each,
+        hybrid=genre_hybrid, raw_scores=genre_raw, include=genre_set,
     ))
-    taken = {r.artist_id for r in genre_recs}
     graph_recs = _dedupe(recommend_by_graph(
-        p, fp, candidates, n=n_each, exclude=taken, hybrid=graph_hybrid,
+        p, fp, candidates, n=n_each,
+        hybrid=graph_hybrid, raw_scores=graph_raw,
+        related_scores=related_raw, include=graph_set,
     ))
 
-    # If graph list is short after dedupe, top up from remaining graph scores.
+    # Top up short lists without recomputing PageRank.
+    taken = {r.artist_id for r in genre_recs} | {r.artist_id for r in graph_recs}
+    if len(genre_recs) < n_each:
+        extra = recommend_by_genre(
+            p, fp, candidates, n=n_each - len(genre_recs),
+            exclude=taken, hybrid=genre_hybrid, raw_scores=genre_raw,
+        )
+        genre_recs = _dedupe(genre_recs + extra)[:n_each]
+        taken = {r.artist_id for r in genre_recs} | {r.artist_id for r in graph_recs}
     if len(graph_recs) < n_each:
         extra = recommend_by_graph(
-            p, fp, candidates, n=n_each,
-            exclude=taken | {r.artist_id for r in graph_recs},
-            hybrid=graph_hybrid,
+            p, fp, candidates, n=n_each - len(graph_recs),
+            exclude=taken, hybrid=graph_hybrid, raw_scores=graph_raw,
+            related_scores=related_raw,
         )
         graph_recs = _dedupe(graph_recs + extra)[:n_each]
 
