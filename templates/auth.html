@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Spotify Recommender</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="auth-screen">
+    <div class="auth-card">
+      <h1>Spotify Recommender</h1>
+      <p>To recommend music based on your library, playlists, and listening history,
+         we need read-only access to your Spotify account.</p>
+      <p class="auth-meta">Read-only. No playback control. No modifications to your account.</p>
+      <a href="/login" class="btn btn-primary">Connect Spotify</a>
+      <p class="auth-meta">Redirect URI: <code>{{ redirect_uri }}</code></p>
+    </div>
+  </main>
+</body>
+</html>

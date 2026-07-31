@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Spotify Recommender</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top-bar">
+    <div class="title">
+      <span class="logo">●</span>
+      <span class="name">Spotify Recommender</span>
+    </div>
+    <div class="actions">
+      <span class="user">{{ display_name }}</span>
+      <form method="post" action="/refresh" style="display:inline">
+        <button type="submit" class="btn">↻ Refresh</button>
+      </form>
+    </div>
+  </header>
+
+  {% if stub_mode %}
+  <div class="banner banner-info">
+    Showing <strong>STUB MODE</strong> sample data. To use your real Spotify library,
+    fill in <code>.env</code> with credentials from your Spotify app dashboard and restart.
+  </div>
+  {% elif dev_mode_limited %}
+  <div class="banner banner-warn">
+    ⚠ Your Spotify app is in <strong>dev mode</strong> and is returning limited data
+    (empty genre tags, stripped popularity). Open
+    <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">your app dashboard</a>,
+    go to <strong>User Management</strong>, and add your Spotify account email,
+    then click <strong>Refresh</strong> above.
+  </div>
+  {% endif %}
+
+  {% if refresh_error %}
+  <div class="banner banner-error">
+    ⚠ Could not reach Spotify on last refresh: <code>{{ refresh_error }}</code>
+    — showing cached data. Try again in a minute.
+  </div>
+  {% endif %}
+
+  <section class="taste">
+    <h2>Your taste</h2>
+    <div class="taste-grid">
+      <div class="card">
+        <h3>Top genres</h3>
+        <ol class="genres">
+          {% for genre, weight in taste.top_genres %}
+          <li>
+            <span class="genre-name">{{ genre }}</span>
+            <span class="genre-weight">{{ "%.0f"|format(weight) }}</span>
+          </li>
+          {% endfor %}
+          {% if not taste.top_genres %}
+          <li class="muted">No genres available yet — see banner above if dev-mode limited.</li>
+          {% endif %}
+        </ol>
+      </div>
+      <div class="card stats">
+        <h3>Stats</h3>
+        <dl>
+          <dt>Liked songs (recent)</dt><dd>{{ taste.n_liked }}</dd>
+          <dt>Playlists</dt><dd>{{ taste.n_playlists }}</dd>
+          <dt>Distinct tracks known</dt><dd>{{ taste.n_tracks_total }}</dd>
+        </dl>
+      </div>
+    </div>
+  </section>
+
+  <section class="recs">
+    <h2>Recommendations <span class="subtitle">based on genre overlap</span></h2>
+    {% if genre_recs %}
+    <div class="rec-grid">
+      {% for r in genre_recs %}
+      <article class="rec-card">
+        <div class="rec-artist">{{ r.artist_name }}</div>
+        <div class="rec-track">{{ r.track_name }}</div>
+        <div class="rec-reason">{{ r.reason }}</div>
+        <a class="btn btn-open" href="{{ r.web_url }}" target="_blank" rel="noopener">
+          ▶ Open in Spotify
+        </a>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="empty">
+      Genre-based recs need genres in your taste profile, which come from your
+      top-artists data. If this is dev-mode-limited, see the banner above.
+    </p>
+    {% endif %}
+  </section>
+
+  <section class="recs">
+    <h2>Recommendations <span class="subtitle">based on co-occurrence (PageRank)</span></h2>
+    {% if graph_recs %}
+    <div class="rec-grid">
+      {% for r in graph_recs %}
+      <article class="rec-card">
+        <div class="rec-artist">{{ r.artist_name }}</div>
+        <div class="rec-track">{{ r.track_name }}</div>
+        <div class="rec-reason">{{ r.reason }}</div>
+        <a class="btn btn-open" href="{{ r.web_url }}" target="_blank" rel="noopener">
+          ▶ Open in Spotify
+        </a>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="empty">No graph recs yet — needs tracks in playlists or liked songs.</p>
+    {% endif %}
+  </section>
+
+  <footer>
+    <p>Press the Refresh button after listening to more music. Cache TTL is 24 hours.</p>
+  </footer>
+</body>
+</html>
