@@ -143,6 +143,9 @@ spotify-rec/
 # Stub smoke test (no Spotify needed):
 SPOTIPY_CLIENT_ID= python bin/smoke_test.py
 
+# Regression unit tests (stdlib unittest; no pytest required):
+SPOTIPY_CLIENT_ID= python -m unittest tests.test_rec_fixes -v
+
 # Offline holdout eval (pipeline sanity; stub hit-rate is expected ~0):
 SPOTIPY_CLIENT_ID= python bin/eval_holdout.py
 

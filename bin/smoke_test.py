@@ -23,8 +23,8 @@ from spotify_client import fetch_profile, profile_data_quality  # noqa: E402
 
 def main() -> int:
     clear_caches()
-    # Bypass stale cache from live pulls
-    p = fetch_profile(force=True)
+    # Bypass stale cache from live pulls; do not write stub into data/spotify.json
+    p = fetch_profile(force=True, persist=False)
     assert p.user_id == "stub_user", p.user_id
     assert any(pl.track_ids for pl in p.playlists), "stub playlists empty"
     assert any(pl.artist_ids for pl in p.playlists), "stub playlist artists empty"

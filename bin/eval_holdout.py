@@ -70,7 +70,8 @@ def main() -> int:
     n_holdout = int(os.environ.get("HOLDOUT_N", "5"))
     clear_caches()
     force = is_stub_mode()
-    p = fetch_profile(force=force)
+    # persist=False so stub force-refresh never overwrites a live cache
+    p = fetch_profile(force=force, persist=False)
 
     # Prefer short-term top artists as holdouts (strongest signal).
     pool = list(p.top_artists_short)

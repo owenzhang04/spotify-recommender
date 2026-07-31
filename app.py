@@ -102,6 +102,25 @@ def _spotify_web_url(uri: str) -> str:
     return f"https://open.spotify.com/{parts[1]}/{parts[2]}"
 
 
+def _dev_mode_limited(profile) -> bool:
+    """Same detector for `/` and `/healthz` (live mode only)."""
+    if profile is None or is_stub_mode():
+        return False
+    return bool(profile_data_quality(profile).get("dev_mode_limited"))
+
+
+def _wants_json(request: Request) -> bool:
+    """True for API clients; false for normal browser form posts."""
+    if request.query_params.get("format", "").lower() == "json":
+        return True
+    accept = request.headers.get("accept", "")
+    for part in accept.split(","):
+        media = part.split(";")[0].strip().lower()
+        if media == "application/json":
+            return True
+    return False
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Routes
 # ─────────────────────────────────────────────────────────────────────
@@ -109,24 +128,14 @@ def _spotify_web_url(uri: str) -> str:
 @app.get("/healthz")
 def healthz() -> dict:
     profile = load_cached_profile(force=True)
-    from recommender import analyze_taste
     quality = profile_data_quality(profile) if profile else None
-    if profile and not is_stub_mode():
-        fp = analyze_taste(profile)
-        # Prefer the richer quality detector; fall back to empty genres.
-        dev_limited = bool(
-            (quality or {}).get("dev_mode_limited")
-            or len(fp.top_genres) == 0
-        )
-    else:
-        dev_limited = False
     err = last_refresh_error()
     return {
         "ok": True,
         "stub_mode": is_stub_mode(),
         "has_token": _has_live_token(),
         "has_cached_profile": profile is not None,
-        "dev_mode_limited": dev_limited,
+        "dev_mode_limited": _dev_mode_limited(profile),
         "last_refresh_error": err,
         "data_quality": quality,
     }
@@ -177,14 +186,11 @@ async def index(request: Request) -> HTMLResponse:
     else:
         profile = cached
     recs = recommend(profile, n_each=8)
-    from recommender import analyze_taste
-    fp = analyze_taste(profile)
     ctx = _recs_to_context(recs)
     ctx["display_name"] = profile.display_name
     ctx["stub_mode"] = is_stub_mode()
-    # Spotify dev-mode throttling silently strips genre tags and popularity.
-    # We detect by checking whether the taste fingerprint has any genres.
-    ctx["dev_mode_limited"] = (not is_stub_mode()) and len(fp.top_genres) == 0
+    # Same detector as /healthz (genres stripped + flat popularity).
+    ctx["dev_mode_limited"] = _dev_mode_limited(profile)
     err = last_refresh_error()
     ctx["refresh_error"] = err
     return templates.TemplateResponse(request, "index.html", ctx)
@@ -209,14 +215,17 @@ async def callback(code: str) -> RedirectResponse:
 
 
 @app.post("/refresh")
-async def refresh() -> dict:
+async def refresh(request: Request):
     """Force-rebuild the taste profile from Spotify (busts cache).
 
-    If Spotify is rate-limited or auth fails, fall back to the cached
-    profile rather than 500ing. The user can still see the page.
+    Browser form posts redirect back to `/` so the page reloads with
+    fresh recs. API clients can keep JSON via Accept: application/json
+    or ?format=json.
     """
     clear_caches()
     profile = fetch_profile(force=True)
+    if not _wants_json(request):
+        return RedirectResponse("/", status_code=303)
     recs = recommend(profile, n_each=8)
     quality = profile_data_quality(profile)
     return {

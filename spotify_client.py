@@ -398,8 +398,12 @@ def save_cached_profile(p: TasteProfile) -> None:
     SPOTIFY_CACHE_PATH.write_text(json.dumps(_serialize_profile(p), indent=2))
 
 
-def fetch_profile(force: bool = False) -> TasteProfile:
-    """Get the user's taste profile. Cached unless force=True or no cache."""
+def fetch_profile(force: bool = False, persist: bool = True) -> TasteProfile:
+    """Get the user's taste profile. Cached unless force=True or no cache.
+
+    persist=False skips writing data/spotify.json (used by smoke/eval so
+    stub runs don't wipe a live cache on disk).
+    """
     if not force:
         cached = load_cached_profile()
         if cached is not None:
@@ -407,7 +411,9 @@ def fetch_profile(force: bool = False) -> TasteProfile:
 
     if is_stub_mode():
         profile = _stub_profile()
-        save_cached_profile(profile)
+        if persist:
+            save_cached_profile(profile)
+        _last_refresh_error["value"] = None
         return profile
 
     client = SpotifyClient(
@@ -419,7 +425,9 @@ def fetch_profile(force: bool = False) -> TasteProfile:
     # back to whatever's on disk (even if past TTL) rather than 500ing.
     try:
         profile = client.fetch_profile()
-        save_cached_profile(profile)
+        if persist:
+            save_cached_profile(profile)
+        _last_refresh_error["value"] = None
         return profile
     except Exception as e:
         cached = load_cached_profile(force=True)
